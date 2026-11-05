@@ -18,6 +18,8 @@ TABLES = {
     "upcoming": "semantic/semantic_upcoming_matchups.parquet",
     "form": "semantic/semantic_team_season_form.parquet",
     "results": "semantic/semantic_game_results.parquet",
+    "spread_bands": "semantic/semantic_consensus_spread_bands.parquet",
+    "total_bands": "semantic/semantic_consensus_total_bands.parquet",
 }
 
 
