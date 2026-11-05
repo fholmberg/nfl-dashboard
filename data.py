@@ -20,6 +20,8 @@ TABLES = {
     "results": "semantic/semantic_game_results.parquet",
     "spread_bands": "semantic/semantic_consensus_spread_bands.parquet",
     "total_bands": "semantic/semantic_consensus_total_bands.parquet",
+    "spread_line_bands": "semantic/semantic_spread_line_bands.parquet",
+    "total_line_bands": "semantic/semantic_total_line_bands.parquet",
 }
 
 

@@ -50,6 +50,24 @@ def consensus_bar(label: str, share: float, color: str = "#4c78a8") -> None:
     st.progress(min(max(float(share), 0.0), 1.0))
 
 
+def line_bucket(abs_spread: float) -> str:
+    if abs_spread == 0:
+        return "Pick'em (0)"
+    for edge, label in [(2.5, "0.5-2.5 pts"), (6.5, "3-6.5 pts"), (9.5, "7-9.5 pts"), (13.5, "10-13.5 pts")]:
+        if abs_spread <= edge:
+            return label
+    return "14+ pts"
+
+
+def total_bucket(line: float) -> str:
+    if line < 40:
+        return "Under 40"
+    for edge, label in [(43.5, "40-43.5"), (47.5, "44-47.5"), (51.5, "48-51.5"), (55.5, "52-55.5")]:
+        if line <= edge:
+            return label
+    return "56+"
+
+
 def band_label(share: float) -> str:
     if pd.isna(share):
         return "—"
@@ -89,6 +107,35 @@ def band_panel(g) -> str:
         r = league[league["season"] == season]
         bits.append(f"{label}: {pct(r.iloc[0].hit_pct) if not r.empty else '—'} (n={int(r.iloc[0].games) if not r.empty else 0})")
     lines.append(f"- **Total** — consensus favors the **{side}** at {pct(share)} (band **{band}**): league hit rate {'; '.join(bits)}.")
+
+    league_bands = load("spread_bands")
+    league_bands = league_bands[league_bands["scope"] == "League"]
+    for team, share in ((g.away_team, g.away_consensus_pct), (g.home_team, g.home_consensus_pct)):
+        band = band_label(share)
+        r = league_bands[(league_bands["season"] == int(g.season)) & (league_bands["consensus_band"] == band)]
+        r_all = league_bands[(league_bands["season"] == 0) & (league_bands["consensus_band"] == band)]
+        def fmt(r):
+            return "no history" if r.empty else f"{pct(r.iloc[0].cover_pct)} cover (n={int(r.iloc[0].games)}), {pct(r.iloc[0].win_pct)} won"
+        lines.append(f"- **All teams, {band} band** — this season {fmt(r)}; all seasons {fmt(r_all)}.")
+
+    # By-the-line context: what does this spread/total size usually do?
+    sl = load("spread_line_bands"); sl = sl[sl["scope"] == "League"]
+    bucket = line_bucket(abs(float(g.away_spread_points))) if pd.notna(g.away_spread_points) else "—"
+    lines.append("")
+    lines.append(f"**By the line — {bucket} spreads (e.g. {g.spread_favorite} {g.away_spread_points:+.1f}):**")
+    for role in ("Favorite", "Underdog"):
+        for season, label in ((int(g.season), "this season"), (0, "all seasons")):
+            r = sl[(sl["season"] == season) & (sl["spread_role"] == role) & (sl["spread_line_bucket"] == bucket)]
+            if not r.empty:
+                r = r.iloc[0]
+                lines.append(f"- {role}s, {label}: {pct(r.cover_pct)} cover (n={int(r.games)}), {pct(r.win_pct)} won outright.")
+    tl = load("total_line_bands"); tl = tl[tl["scope"] == "League"]
+    tbucket = total_bucket(float(g.totals_line_points)) if pd.notna(g.totals_line_points) else "—"
+    for season, label in ((int(g.season), "this season"), (0, "all seasons")):
+        r = tl[(tl["season"] == season) & (tl["totals_line_bucket"] == tbucket)]
+        if not r.empty:
+            r = r.iloc[0]
+            lines.append(f"- Totals line {tbucket} ({g.totals_line_points}), {label}: over hit {pct(r.over_pct)} (n={int(r.games)}).")
     return "\n".join(lines)
 
 
@@ -162,6 +209,23 @@ def page_consensus() -> None:
             st.markdown(f"**Consensus on the {side}**")
             st.dataframe(dd[["consensus_band", "games", "hits", "pushes", "hit_pct"]],
                          hide_index=True, width="stretch")
+
+    st.subheader("By the spread line — favorites vs underdogs")
+    sl = load("spread_line_bands")
+    d = sl[(sl["scope"] == "League") & (sl["season"] == season_pick) & (sl["spread_role"] != "Even")]
+    for role in ("Favorite", "Underdog"):
+        dd = d[d["spread_role"] == role].sort_values("spread_line_bucket_order")
+        st.markdown(f"**{role}s by spread size**")
+        st.dataframe(dd[["spread_line_bucket", "games", "covers", "pushes", "cover_pct", "win_pct"]],
+                     hide_index=True, width="stretch")
+        st.bar_chart(dd.set_index("spread_line_bucket")["cover_pct"], height=200)
+
+    st.subheader("By the totals line — over hit rate")
+    tl = load("total_line_bands")
+    d = tl[(tl["scope"] == "League") & (tl["season"] == season_pick)].sort_values("totals_line_bucket_order")
+    st.dataframe(d[["totals_line_bucket", "games", "overs", "pushes", "over_pct", "under_pct"]],
+                 hide_index=True, width="stretch")
+    st.bar_chart(d.set_index("totals_line_bucket")["over_pct"], height=200)
 
 
 def page_form() -> None:
