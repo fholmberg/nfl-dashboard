@@ -1,4 +1,4 @@
-"""NFL Matchup Board — decision-support dashboard (private).
+"""Matchup Board — NFL + NCAAF decision-support dashboard (private).
 
 Presents statistics and market data from the elt-pipeline semantic layer
 for users to make their own decisions. It does not recommend bets.
@@ -12,7 +12,7 @@ import streamlit as st
 
 from data import load
 
-st.set_page_config(page_title="NFL Matchup Board", page_icon="🏈", layout="wide")
+st.set_page_config(page_title="Matchup Board", page_icon="🏈", layout="wide")
 
 CSS = """
 <style>
@@ -50,8 +50,16 @@ TEAM_COLORS = {
 }
 
 
+_PALETTE = ["#4a7fc9", "#2ba8a0", "#e08a3c", "#9a7fc9", "#e14b5a", "#69BE28",
+            "#c9a227", "#5a86d6", "#d06a6a", "#4f9e79", "#8fa9c9", "#FB4F14"]
+
+
 def color(team: str) -> str:
-    return TEAM_COLORS.get(team, "#7e93a6")
+    # NFL short names have brand colors; NCAAF full names get a stable
+    # per-team color from the palette.
+    if team in TEAM_COLORS:
+        return TEAM_COLORS[team]
+    return _PALETTE[sum(ord(c) for c in str(team)) % len(_PALETTE)]
 
 
 def require_password() -> bool:
@@ -67,7 +75,7 @@ def require_password() -> bool:
         return True
     _, mid, _ = st.columns([1, 1.2, 1])
     with mid:
-        st.title("🏈 NFL Matchup Board")
+        st.title("🏈 Matchup Board")
         with st.form("login"):
             pw = st.text_input("Password", type="password")
             if st.form_submit_button("Enter", width="stretch") and pw == expected:
@@ -101,7 +109,14 @@ def line_bucket(abs_spread: float) -> str:
     return "14+ pts"
 
 
-def total_bucket(line: float) -> str:
+def total_bucket(line: float, sport: str = "nfl") -> str:
+    if sport == "ncaaf":  # college totals run higher; mirrors fct_ncaaf_team_market_games
+        if line < 45:
+            return "Under 45"
+        for edge, label in [(49.5, "45-49.5"), (54.5, "50-54.5"), (59.5, "55-59.5"), (64.5, "60-64.5")]:
+            if line <= edge:
+                return label
+        return "65+"
     if line < 40:
         return "Under 40"
     for edge, label in [(43.5, "40-43.5"), (47.5, "44-47.5"), (51.5, "48-51.5"), (55.5, "52-55.5")]:
@@ -110,11 +125,11 @@ def total_bucket(line: float) -> str:
     return "56+"
 
 
-def team_block(team: str, record: str, rank, spread_pts, align: str = "left") -> None:
+def team_block(team: str, record: str, rank_text: str, spread_pts, align: str = "left") -> None:
     st.markdown(
         f'<div style="text-align:{align}"><div class="team-name">'
         f'<span style="color:{color(team)}">●</span> {team}</div>'
-        f'<div class="team-sub">{record} · Rank #{int(rank) if pd.notna(rank) else "—"}</div></div>',
+        f'<div class="team-sub">{record} · {rank_text}</div></div>',
         unsafe_allow_html=True,
     )
     st.metric("Spread (pts)", f"{spread_pts:+.1f}" if pd.notna(spread_pts) else "—")
@@ -160,8 +175,8 @@ def _band_row(bands: pd.DataFrame, team: str, season: int, band: str) -> str:
     return f"{pct(r.cover_pct)} cover (n={int(r.games)}), {pct(r.win_pct)} won"
 
 
-def band_panel(g) -> str:
-    bands = load("spread_bands")
+def band_panel(g, sport: str = "nfl") -> str:
+    bands = load("spread_bands", sport)
     team_bands = bands[bands["scope"] == "Team"]
     league_bands = bands[bands["scope"] == "League"]
     lines = ["**When a team sits in tonight's consensus band, how often has it covered?**", ""]
@@ -178,7 +193,7 @@ def band_panel(g) -> str:
             return "no history" if r.empty else f"{pct(r.iloc[0].cover_pct)} cover (n={int(r.iloc[0].games)}), {pct(r.iloc[0].win_pct)} won"
         lines.append(f"- **All teams, {band} band** — this season {fmt(r)}; all seasons {fmt(r_all)}.")
 
-    totals = load("total_bands")
+    totals = load("total_bands", sport)
     side = "Over" if (pd.notna(g.over_consensus_pct) and g.over_consensus_pct >= 0.5) else "Under"
     share = g.over_consensus_pct if side == "Over" else g.under_consensus_pct
     band = band_label(share) if pd.notna(share) else "—"
@@ -189,7 +204,7 @@ def band_panel(g) -> str:
         bits.append(f"{label}: {pct(r.iloc[0].hit_pct) if not r.empty else '—'} (n={int(r.iloc[0].games) if not r.empty else 0})")
     lines.append(f"- **Total** — consensus favors the **{side}** at {pct(share)} (band **{band}**): league hit rate {'; '.join(bits)}.")
 
-    sl = load("spread_line_bands")
+    sl = load("spread_line_bands", sport)
     sl = sl[sl["scope"] == "League"]
     bucket = line_bucket(abs(float(g.away_spread_points))) if pd.notna(g.away_spread_points) else "—"
     lines.append("")
@@ -200,9 +215,9 @@ def band_panel(g) -> str:
             if not r.empty:
                 r = r.iloc[0]
                 lines.append(f"- {role}s, {label}: {pct(r.cover_pct)} cover (n={int(r.games)}), {pct(r.win_pct)} won outright.")
-    tl = load("total_line_bands")
+    tl = load("total_line_bands", sport)
     tl = tl[tl["scope"] == "League"]
-    tbucket = total_bucket(float(g.totals_line_points)) if pd.notna(g.totals_line_points) else "—"
+    tbucket = total_bucket(float(g.totals_line_points), sport) if pd.notna(g.totals_line_points) else "—"
     for season, label in ((int(g.season), "this season"), (0, "all seasons")):
         r = tl[(tl["season"] == season) & (tl["totals_line_bucket"] == tbucket)]
         if not r.empty:
@@ -211,11 +226,12 @@ def band_panel(g) -> str:
     return "\n".join(lines)
 
 
-def page_today() -> None:
+def page_today(sport: str = "nfl") -> None:
     st.header("Today's games")
-    df = load("upcoming")
+    df = load("upcoming", sport)
     if df.empty:
-        st.info("No games scheduled today. The board refreshes on the pipeline schedule (Sun / Mon / Thu, Pacific).")
+        sched = "Fri / Sat, Pacific" if sport == "ncaaf" else "Sun / Mon / Thu, Pacific"
+        st.info(f"No games scheduled today. The board refreshes on the pipeline schedule ({sched}).")
         return
     if len(df) > 1:
         labels = [f"{r.away_team} @ {r.home_team}" for r in df.itertuples()]
@@ -224,15 +240,24 @@ def page_today() -> None:
     for _, g in df.iterrows():
         fav = g.spread_favorite if pd.notna(g.spread_favorite) else "—"
         with st.container(border=True):
+            def rank_text(rank, season_rank) -> str:
+                if sport == "ncaaf":
+                    return f"AP Top 25: #{int(rank)}" if pd.notna(rank) else "Unranked (AP)"
+                return f"Rank #{int(season_rank) if pd.notna(season_rank) else '—'}"
+
             a, mid, h = st.columns([2, 1, 2])
             with a:
-                team_block(g.away_team, g.away_record_display, g.away_season_rank, g.away_spread_points)
+                team_block(g.away_team, g.away_record_display,
+                           rank_text(getattr(g, "away_rank", None), g.away_season_rank), g.away_spread_points)
             with mid:
                 st.markdown('<div class="vs">@</div>', unsafe_allow_html=True)
-                st.markdown(f'<div style="text-align:center;margin-top:0.45rem"><span class="pill">{fav} favored</span></div>', unsafe_allow_html=True)
+                top25 = sport == "ncaaf" and bool(getattr(g, "is_top25_matchup", False))
+                pill = "Top-25 matchup" if top25 else f"{fav} favored"
+                st.markdown(f'<div style="text-align:center;margin-top:0.45rem"><span class="pill">{pill}</span></div>', unsafe_allow_html=True)
                 st.metric("Total (pts)", g.totals_line_points)
             with h:
-                team_block(g.home_team, g.home_record_display, g.home_season_rank, g.home_spread_points, align="right")
+                team_block(g.home_team, g.home_record_display,
+                           rank_text(getattr(g, "home_rank", None), g.home_season_rank), g.home_spread_points, align="right")
             duel_bar(g.away_team, g.away_consensus_pct, g.home_team, g.home_consensus_pct)
             st.divider()
             compare_row("Win %", g.away_win_pct, g.home_win_pct, g.away_team, g.home_team)
@@ -244,7 +269,7 @@ def page_today() -> None:
             c1.metric(f"{g.away_team} avg points", f"{g.away_avg_points_scored:.1f}")
             c2.metric(f"{g.home_team} avg points", f"{g.home_avg_points_scored:.1f}")
             with st.expander("What history says in this spot — consensus band & line context"):
-                st.markdown(band_panel(g))
+                st.markdown(band_panel(g, sport))
         st.caption("ATS = against the spread. Cover % excludes pushes. The panel below the expander "
                    "conditions on tonight's consensus band and spread size — always check n=")
 
@@ -266,13 +291,14 @@ def band_chart(d: pd.DataFrame, x: str, y: str, title: str) -> None:
     st.altair_chart(chart, width="stretch")
 
 
-def page_consensus() -> None:
+def page_consensus(sport: str = "nfl") -> None:
     st.header("Consensus — does the crowd cover?")
     st.caption("Rates are conditional on a team's own consensus share (mirrored bands). "
                "Cover % excludes pushes; win % is outright. Small n = weak evidence.")
-    bands = load("spread_bands")
-    seasons_avail = [2026, 0] + sorted([int(s) for s in bands["season"].unique() if s not in (0, 2026)], reverse=True)
-    season_pick = st.segmented_control("Season (0 = all seasons)", seasons_avail, default=2026)
+    bands = load("spread_bands", sport)
+    latest = int(bands["season"].max())
+    seasons_avail = [latest, 0] + sorted([int(s) for s in bands["season"].unique() if s not in (0, latest)], reverse=True)
+    season_pick = st.segmented_control("Season (0 = all seasons)", seasons_avail, default=latest)
 
     league = bands[(bands["scope"] == "League") & (bands["season"] == season_pick)]
     tab_fav, tab_dog, tab_tot, tab_line = st.tabs(["Favorites", "Underdogs", "Totals", "By the line"])
@@ -285,7 +311,7 @@ def page_consensus() -> None:
         band_chart(d.assign(cover_pct=d["cover_pct"]), "consensus_band", "cover_pct", "Cover %")
         st.dataframe(d[["consensus_band", "games", "covers", "pushes", "cover_pct", "game_wins", "win_pct"]], hide_index=True, width="stretch")
     with tab_tot:
-        totals = load("total_bands")
+        totals = load("total_bands", sport)
         d = totals[(totals["scope"] == "League") & (totals["season"] == season_pick)]
         side = st.segmented_control("Favored side", ["Over", "Under"], default="Over")
         dd = d[d["totals_consensus_side"] == side].sort_values("consensus_band_order")
@@ -293,13 +319,13 @@ def page_consensus() -> None:
                    "consensus_band", "cover_pct", "Hit %")
         st.dataframe(dd[["consensus_band", "games", "hits", "pushes", "hit_pct"]], hide_index=True, width="stretch")
     with tab_line:
-        sl = load("spread_line_bands")
+        sl = load("spread_line_bands", sport)
         d = sl[(sl["scope"] == "League") & (sl["season"] == season_pick) & (sl["spread_role"] != "Even")]
         role = st.segmented_control("Role ", ["Favorite", "Underdog"], default="Favorite")
         dd = d[d["spread_role"] == role].sort_values("spread_line_bucket_order")
         band_chart(dd, "spread_line_bucket", "cover_pct", "Cover %")
         st.dataframe(dd[["spread_line_bucket", "games", "covers", "pushes", "cover_pct", "win_pct"]], hide_index=True, width="stretch")
-        tl = load("total_line_bands")
+        tl = load("total_line_bands", sport)
         d = tl[(tl["scope"] == "League") & (tl["season"] == season_pick)].sort_values("totals_line_bucket_order")
         st.markdown("**Totals line — over hit rate**")
         band_chart(d.rename(columns={"over_pct": "cover_pct", "overs": "covers"})[["totals_line_bucket", "cover_pct", "games"]],
@@ -314,9 +340,9 @@ def page_consensus() -> None:
         hide_index=True, width="stretch")
 
 
-def page_form() -> None:
+def page_form(sport: str = "nfl") -> None:
     st.header("Team form")
-    form = load("form")
+    form = load("form", sport)
     seasons = sorted(form["season"].unique(), reverse=True)
     season = st.segmented_control("Season", seasons, default=seasons[0])
     d = form[form["season"] == season].sort_values("season_rank")
@@ -356,10 +382,10 @@ def page_form() -> None:
     st.altair_chart(chart, width="stretch")
 
 
-def page_trends() -> None:
+def page_trends(sport: str = "nfl") -> None:
     st.header("Trends")
-    res = load("results")
-    form = load("form")
+    res = load("results", sport)
+    form = load("form", sport)
     team = st.selectbox("Team", sorted(form["team_name"].unique()))
     seasons = sorted(res["season"].unique(), reverse=True)
     season = st.segmented_control("Season ", seasons, default=seasons[0])
@@ -406,12 +432,16 @@ def page_trends() -> None:
 if not require_password():
     st.stop()
 
-st.title("🏈 NFL Matchup Board")
+sport_label = st.sidebar.radio("Sport", ["NFL", "NCAAF"])
+sport = sport_label.lower()
+
+st.title(f"{'🏈' if sport == 'nfl' else '🎓'} {sport_label} Matchup Board")
+src = "ESPN + Covers" if sport == "ncaaf" else "nflverse + Covers"
 st.caption(
-    "Data: nflverse + Covers via the elt-pipeline warehouse (semantic layer). "
+    f"Data: {src} via the elt-pipeline warehouse (semantic layer). "
     "For information only — statistics and market data for your own decision; "
     "no bet recommendations. Lines move; verify before acting."
 )
 
 page = st.sidebar.radio("Page", ["Today", "Team Form", "Trends", "Consensus"])
-{"Today": page_today, "Team Form": page_form, "Trends": page_trends, "Consensus": page_consensus}[page]()
+{"Today": page_today, "Team Form": page_form, "Trends": page_trends, "Consensus": page_consensus}[page](sport)

@@ -48,11 +48,15 @@ def _con() -> duckdb.DuckDBPyConnection:
 
 
 @st.cache_data(ttl=3600, show_spinner="Loading warehouse data…")
-def load(table: str) -> pd.DataFrame:
-    bucket = _setting("r2_bucket", "nfl")
+def load(table: str, sport: str = "nfl") -> pd.DataFrame:
+    # Each sport publishes the same semantic filenames to its own bucket.
+    bucket = _setting("r2_bucket_ncaaf", "ncaaf") if sport == "ncaaf" else _setting("r2_bucket", "nfl")
     local_dir = _setting("local_warehouse_dir")
     if local_dir:
-        path = f"{local_dir}/data_warehouse/{TABLES[table]}"
+        # Local mirror layout: <dir>/data_warehouse (nfl bucket root) and
+        # <dir>/ncaaf/data_warehouse (ncaaf bucket root).
+        sub = "" if sport == "nfl" else f"{sport}/"
+        path = f"{local_dir}/{sub}data_warehouse/{TABLES[table]}"
     else:
         path = f"s3://{bucket}/data_warehouse/{TABLES[table]}"
     return _con().execute(f"SELECT * FROM read_parquet('{path}')").fetchdf()
