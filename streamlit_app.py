@@ -10,7 +10,7 @@ import altair as alt
 import pandas as pd
 import streamlit as st
 
-from data import load
+from data import games_for_day, load, load_today
 
 st.set_page_config(page_title="Matchup Board", page_icon="🏈", layout="wide")
 
@@ -228,11 +228,19 @@ def band_panel(g, sport: str = "nfl") -> str:
 
 def page_today(sport: str = "nfl") -> None:
     st.header("Today's games")
-    df = load("upcoming", sport)
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    today = datetime.now(ZoneInfo("America/Los_Angeles")).date()
+    df, shown_date, is_today = games_for_day(load_today(sport), today)
     if df.empty:
         sched = "Fri / Sat, Pacific" if sport == "ncaaf" else "Sun / Mon / Thu, Pacific"
         st.info(f"No games scheduled today. The board refreshes on the pipeline schedule ({sched}).")
         return
+    if is_today:
+        st.caption(f"{shown_date:%A, %B %-d} · all times/dates Pacific")
+    else:
+        st.caption(f"No games today — next slate: {shown_date:%A, %B %-d}")
     if len(df) > 1:
         labels = [f"{r.away_team} @ {r.home_team}" for r in df.itertuples()]
         pick = st.selectbox("Game", labels)

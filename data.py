@@ -16,6 +16,10 @@ import streamlit as st
 
 TABLES = {
     "upcoming": "semantic/semantic_upcoming_matchups.parquet",
+    # Silver upcoming holds ALL future fixtures; the Today page filters to
+    # the current date at read time (the semantic table is build-day only
+    # and goes stale between pipeline runs).
+    "upcoming_all": "silver/fct_{sport}_betting_upcoming.parquet",
     "form": "semantic/semantic_team_season_form.parquet",
     "results": "semantic/semantic_game_results.parquet",
     "spread_bands": "semantic/semantic_consensus_spread_bands.parquet",
@@ -60,15 +64,56 @@ def _con() -> duckdb.DuckDBPyConnection:
 def load(table: str, sport: str = "nfl") -> pd.DataFrame:
     # Each sport publishes the same semantic filenames to its own bucket.
     bucket = _setting("r2_bucket_ncaaf", "ncaaf") if sport == "ncaaf" else _setting("r2_bucket", "nfl")
+    rel = TABLES[table].format(sport=sport)
     local_dir = _setting("local_warehouse_dir")
     if local_dir:
         # Local mirror layout: <dir>/data_warehouse (nfl bucket root) and
         # <dir>/ncaaf/data_warehouse (ncaaf bucket root).
         sub = "" if sport == "nfl" else f"{sport}/"
-        path = f"{local_dir}/{sub}data_warehouse/{TABLES[table]}"
+        path = f"{local_dir}/{sub}data_warehouse/{rel}"
     else:
-        path = f"s3://{bucket}/data_warehouse/{TABLES[table]}"
+        path = f"s3://{bucket}/data_warehouse/{rel}"
     try:
         return _con().execute(f"SELECT * FROM read_parquet('{path}')").fetchdf()
     except Exception as exc:  # surface a readable reason instead of a redacted crash
         raise RuntimeError(f"Failed to load {table} ({sport}) from {path}: {type(exc).__name__}: {_masked(str(exc))}") from None
+
+
+_FORM_COLS = ["wins", "losses", "record_display", "win_pct", "season_rank",
+              "against_the_spread_win_pct", "over_pct", "avg_points_scored",
+              "consensus_spread_accuracy", "consensus_total_accuracy"]
+
+
+@st.cache_data(ttl=3600, show_spinner="Loading upcoming games…")
+def load_today(sport: str = "nfl") -> pd.DataFrame:
+    """Future fixtures with season form joined, in the semantic column shape
+    the Today page renders. game_date is filtered by the caller."""
+    df = load("upcoming_all", sport).copy()
+    df = df.rename(columns={
+        "home_spread": "home_spread_points", "away_spread": "away_spread_points",
+        "spread_line": "spread_line_points", "market_favorite_team": "spread_favorite",
+        "spread_home_consensus_pct": "home_consensus_pct",
+        "spread_away_consensus_pct": "away_consensus_pct",
+        "over_under_line": "totals_line_points",
+    })
+    form = load("form", sport)
+    for side in ("home", "away"):
+        f = form[["team_name", "season"] + _FORM_COLS].rename(
+            columns={"team_name": f"{side}_team", **{c: f"{side}_{c}" for c in _FORM_COLS}}
+        )
+        df = df.merge(f, on=[f"{side}_team", "season"], how="left")
+    df["game_date"] = pd.to_datetime(df["game_date"]).dt.date
+    return df
+
+
+def games_for_day(df: pd.DataFrame, day) -> tuple[pd.DataFrame, object, bool]:
+    """Rows for `day`; if none, the next future game day. Past rows never show."""
+    if df.empty:
+        return df, day, True
+    dates = sorted(df["game_date"].unique())
+    if day in dates:
+        return df[df["game_date"] == day], day, True
+    future = [d for d in dates if d > day]
+    if future:
+        return df[df["game_date"] == future[0]], future[0], False
+    return df.iloc[0:0], day, True
