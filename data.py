@@ -20,6 +20,7 @@ TABLES = {
     # the current date at read time (the semantic table is build-day only
     # and goes stale between pipeline runs).
     "upcoming_all": "silver/fct_{sport}_betting_upcoming.parquet",
+    "settled_all": "silver/fct_{sport}_betting_settled.parquet",
     "form": "semantic/semantic_team_season_form.parquet",
     "results": "semantic/semantic_game_results.parquet",
     "spread_bands": "semantic/semantic_consensus_spread_bands.parquet",
@@ -84,18 +85,17 @@ _FORM_COLS = ["wins", "losses", "record_display", "win_pct", "season_rank",
               "consensus_spread_accuracy", "consensus_total_accuracy"]
 
 
-@st.cache_data(ttl=3600, show_spinner="Loading upcoming games…")
-def load_today(sport: str = "nfl") -> pd.DataFrame:
-    """Future fixtures with season form joined, in the semantic column shape
-    the Today page renders. game_date is filtered by the caller."""
-    df = load("upcoming_all", sport).copy()
-    df = df.rename(columns={
+def _market_shape(df: pd.DataFrame) -> pd.DataFrame:
+    return df.rename(columns={
         "home_spread": "home_spread_points", "away_spread": "away_spread_points",
         "spread_line": "spread_line_points", "market_favorite_team": "spread_favorite",
         "spread_home_consensus_pct": "home_consensus_pct",
         "spread_away_consensus_pct": "away_consensus_pct",
         "over_under_line": "totals_line_points",
     })
+
+
+def _join_form(df: pd.DataFrame, sport: str) -> pd.DataFrame:
     form = load("form", sport)
     for side in ("home", "away"):
         f = form[["team_name", "season"] + _FORM_COLS].rename(
@@ -104,6 +104,30 @@ def load_today(sport: str = "nfl") -> pd.DataFrame:
         df = df.merge(f, on=[f"{side}_team", "season"], how="left")
     df["game_date"] = pd.to_datetime(df["game_date"]).dt.date
     return df
+
+
+@st.cache_data(ttl=3600, show_spinner="Loading upcoming games…")
+def load_today(sport: str = "nfl") -> pd.DataFrame:
+    """Future fixtures with season form joined, in the semantic column shape
+    the Today page renders. game_date is filtered by the caller."""
+    return _join_form(_market_shape(load("upcoming_all", sport).copy()), sport)
+
+
+@st.cache_data(ttl=3600, show_spinner="Loading historical games…")
+def load_history(sport: str = "nfl") -> pd.DataFrame:
+    """Played games (scores from the semantic results table) with market
+    context and season form joined, same shape as load_today plus scores."""
+    res = load("results", sport)[
+        ["game_date", "season", "week", "home_team", "away_team", "home_score",
+         "away_score", "winner", "totals_result", "spread_cover_side",
+         *[c for c in ("home_rank", "away_rank", "is_top25_matchup") if c in load("results", sport).columns]]
+    ].copy()
+    settled = _market_shape(load("settled_all", sport).copy())
+    keep = ["game_date", "home_team", "away_team", "home_spread_points", "away_spread_points",
+            "spread_line_points", "spread_favorite", "home_consensus_pct", "away_consensus_pct",
+            "totals_line_points", "over_consensus_pct", "under_consensus_pct"]
+    df = res.merge(settled[keep], on=["game_date", "home_team", "away_team"], how="left")
+    return _join_form(df, sport)
 
 
 def games_for_day(df: pd.DataFrame, day) -> tuple[pd.DataFrame, object, bool]:

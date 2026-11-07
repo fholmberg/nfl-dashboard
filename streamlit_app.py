@@ -10,7 +10,7 @@ import altair as alt
 import pandas as pd
 import streamlit as st
 
-from data import games_for_day, load, load_today
+from data import games_for_day, load, load_history, load_today
 
 st.set_page_config(page_title="Matchup Board", page_icon="🏈", layout="wide")
 
@@ -135,14 +135,31 @@ def team_block(team: str, record: str, rank_text: str, spread_pts, align: str = 
     st.metric("Spread (pts)", f"{spread_pts:+.1f}" if pd.notna(spread_pts) else "—")
 
 
+def _rgb(hex_color: str) -> tuple[int, int, int]:
+    h = hex_color.lstrip("#")
+    return tuple(int(h[i : i + 2], 16) for i in (0, 2, 4))
+
+
+def pair_colors(away_team: str, home_team: str) -> tuple[str, str]:
+    """Away/home colors guaranteed distinguishable: near-identical brand
+    colors (e.g. Cowboys vs Colts blues) get one side lightened."""
+    ca, ch = color(away_team), color(home_team)
+    if sum((a - b) ** 2 for a, b in zip(_rgb(ca), _rgb(ch))) ** 0.5 < 85:
+        r, g, b = _rgb(ch)
+        mix = 255 if (0.299 * r + 0.587 * g + 0.114 * b) < 190 else 0
+        ch = "#{:02x}{:02x}{:02x}".format(*(round(c + (mix - c) * 0.8) for c in (r, g, b)))
+    return ca, ch
+
+
 def duel_bar(away_team: str, away_share, home_team: str, home_share) -> None:
     if pd.isna(away_share) or pd.isna(home_share):
         st.caption("No consensus data for this game yet.")
         return
+    ca, ch = pair_colors(away_team, home_team)
     a = int(round(float(away_share) * 100))
     st.markdown(
-        f'<div class="duel"><div style="width:{a}%;background:{color(away_team)}"></div>'
-        f'<div style="width:{100 - a}%;background:{color(home_team)}"></div></div>'
+        f'<div class="duel"><div style="width:{a}%;background:{ca}"></div>'
+        f'<div style="width:{100 - a}%;background:{ch}"></div></div>'
         f'<div style="display:flex;justify-content:space-between" class="small">'
         f"<span>{away_team} {a}%</span><span>betting consensus</span><span>{home_team} {100 - a}%</span></div>",
         unsafe_allow_html=True,
@@ -150,11 +167,13 @@ def duel_bar(away_team: str, away_share, home_team: str, home_share) -> None:
 
 
 def compare_row(label: str, away_val, home_val, away_team: str, home_team: str) -> None:
+    pair = dict(zip((away_team, home_team), pair_colors(away_team, home_team)))
+
     def side(val, team, flip: bool) -> str:
         if pd.isna(val):
             return '<div class="bar-val">—</div>'
         w = int(round(float(val) * 100))
-        style = f"width:{w}%;background:{color(team)};" + ("margin-left:auto;" if flip else "")
+        style = f"width:{w}%;background:{pair.get(team, color(team))};" + ("margin-left:auto;" if flip else "")
         return (f'<div style="display:flex;align-items:center;gap:8px;'
                 f'{"flex-direction:row-reverse;" if flip else ""}">'
                 f'<div class="bar-track" style="flex:1"><div class="bar-fill" style="{style}"></div></div>'
@@ -167,12 +186,22 @@ def compare_row(label: str, away_val, home_val, away_team: str, home_team: str) 
     )
 
 
+def cpct(x) -> str:
+    """Percentage colored by value: green strong, pale green above 50%,
+    amber 45-50%, red below 45%. For rates where higher reads better."""
+    if pd.isna(x):
+        return "—"
+    v = float(x)
+    c = "#3fb950" if v >= 0.55 else "#7bd79e" if v >= 0.50 else "#d8a13a" if v >= 0.45 else "#e05d5d"
+    return f'<span style="color:{c};font-weight:650">{v * 100:.0f}%</span>'
+
+
 def _band_row(bands: pd.DataFrame, team: str, season: int, band: str) -> str:
     r = bands[(bands["team_name"] == team) & (bands["season"] == season) & (bands["consensus_band"] == band)]
     if r.empty:
         return "no history"
     r = r.iloc[0]
-    return f"{pct(r.cover_pct)} cover (n={int(r.games)}), {pct(r.win_pct)} won"
+    return f"{cpct(r.cover_pct)} cover (n={int(r.games)}), {cpct(r.win_pct)} won"
 
 
 def band_panel(g, sport: str = "nfl") -> str:
@@ -190,7 +219,7 @@ def band_panel(g, sport: str = "nfl") -> str:
         r = league_bands[(league_bands["season"] == int(g.season)) & (league_bands["consensus_band"] == band)]
         r_all = league_bands[(league_bands["season"] == 0) & (league_bands["consensus_band"] == band)]
         def fmt(r):
-            return "no history" if r.empty else f"{pct(r.iloc[0].cover_pct)} cover (n={int(r.iloc[0].games)}), {pct(r.iloc[0].win_pct)} won"
+            return "no history" if r.empty else f"{cpct(r.iloc[0].cover_pct)} cover (n={int(r.iloc[0].games)}), {cpct(r.iloc[0].win_pct)} won"
         lines.append(f"- **All teams, {band} band** — this season {fmt(r)}; all seasons {fmt(r_all)}.")
 
     totals = load("total_bands", sport)
@@ -201,7 +230,7 @@ def band_panel(g, sport: str = "nfl") -> str:
     bits = []
     for season, label in ((int(g.season), "this season"), (0, "all seasons")):
         r = league[league["season"] == season]
-        bits.append(f"{label}: {pct(r.iloc[0].hit_pct) if not r.empty else '—'} (n={int(r.iloc[0].games) if not r.empty else 0})")
+        bits.append(f"{label}: {cpct(r.iloc[0].hit_pct) if not r.empty else '—'} (n={int(r.iloc[0].games) if not r.empty else 0})")
     lines.append(f"- **Total** — consensus favors the **{side}** at {pct(share)} (band **{band}**): league hit rate {'; '.join(bits)}.")
 
     sl = load("spread_line_bands", sport)
@@ -214,7 +243,7 @@ def band_panel(g, sport: str = "nfl") -> str:
             r = sl[(sl["season"] == season) & (sl["spread_role"] == role) & (sl["spread_line_bucket"] == bucket)]
             if not r.empty:
                 r = r.iloc[0]
-                lines.append(f"- {role}s, {label}: {pct(r.cover_pct)} cover (n={int(r.games)}), {pct(r.win_pct)} won outright.")
+                lines.append(f"- {role}s, {label}: {cpct(r.cover_pct)} cover (n={int(r.games)}), {cpct(r.win_pct)} won outright.")
     tl = load("total_line_bands", sport)
     tl = tl[tl["scope"] == "League"]
     tbucket = total_bucket(float(g.totals_line_points), sport) if pd.notna(g.totals_line_points) else "—"
@@ -222,14 +251,80 @@ def band_panel(g, sport: str = "nfl") -> str:
         r = tl[(tl["season"] == season) & (tl["totals_line_bucket"] == tbucket)]
         if not r.empty:
             r = r.iloc[0]
-            lines.append(f"- Totals line {tbucket} ({g.totals_line_points}), {label}: over hit {pct(r.over_pct)} (n={int(r.games)}).")
+            lines.append(f"- Totals line {tbucket} ({g.totals_line_points}), {label}: over hit {cpct(r.over_pct)} (n={int(r.games)}).")
     return "\n".join(lines)
+
+
+def render_matchup_card(g, sport: str, played: bool = False) -> None:
+    fav = g.spread_favorite if pd.notna(g.spread_favorite) else "—"
+    with st.container(border=True):
+        def rank_text(rank, season_rank) -> str:
+            if sport == "ncaaf":
+                return f"AP Top 25: #{int(rank)}" if pd.notna(rank) else "Unranked (AP)"
+            return f"Rank #{int(season_rank) if pd.notna(season_rank) else '—'}"
+
+        a, mid, h = st.columns([2, 1, 2])
+        with a:
+            team_block(g.away_team, g.away_record_display,
+                       rank_text(getattr(g, "away_rank", None), g.away_season_rank), g.away_spread_points)
+        with mid:
+            st.markdown('<div class="vs">@</div>', unsafe_allow_html=True)
+            top25 = sport == "ncaaf" and bool(getattr(g, "is_top25_matchup", False))
+            pill = "Top-25 matchup" if top25 else f"{fav} favored"
+            st.markdown(f'<div style="text-align:center;margin-top:0.45rem"><span class="pill">{pill}</span></div>', unsafe_allow_html=True)
+            if played:
+                st.metric("Final", f"{int(g.away_score)} – {int(g.home_score)}")
+            else:
+                st.metric("Total (pts)", g.totals_line_points)
+        with h:
+            team_block(g.home_team, g.home_record_display,
+                       rank_text(getattr(g, "home_rank", None), g.home_season_rank), g.home_spread_points, align="right")
+        if played:
+            cover = getattr(g, "spread_cover_side", None)
+            st.caption(
+                f"Winner: **{g.winner}** · Spread cover: **{cover if pd.notna(cover) else '—'}** · "
+                f"Total ({g.totals_line_points}): **{g.totals_result if pd.notna(g.totals_result) else '—'}**"
+            )
+        duel_bar(g.away_team, g.away_consensus_pct, g.home_team, g.home_consensus_pct)
+        st.divider()
+        compare_row("Win %", g.away_win_pct, g.home_win_pct, g.away_team, g.home_team)
+        compare_row("Cover % (ATS)", g.away_against_the_spread_win_pct, g.home_against_the_spread_win_pct, g.away_team, g.home_team)
+        compare_row("Over %", g.away_over_pct, g.home_over_pct, g.away_team, g.home_team)
+        compare_row("Consensus spread accuracy", g.away_consensus_spread_accuracy, g.home_consensus_spread_accuracy, g.away_team, g.home_team)
+        compare_row("Consensus total accuracy", g.away_consensus_total_accuracy, g.home_consensus_total_accuracy, g.away_team, g.home_team)
+        c1, c2 = st.columns(2)
+        c1.metric(f"{g.away_team} avg points", f"{g.away_avg_points_scored:.1f}")
+        c2.metric(f"{g.home_team} avg points", f"{g.home_avg_points_scored:.1f}")
+        with st.expander("What history says in this spot — consensus band & line context"):
+            st.markdown(band_panel(g, sport), unsafe_allow_html=True)
+    st.caption("ATS = against the spread. Cover % excludes pushes. Percentages in the "
+               "history panel are colored by value (green ≥55%, pale green ≥50%, amber 45–50%, red <45%) — always check n=")
 
 
 def page_today(sport: str = "nfl") -> None:
     st.header("Today's games")
     from datetime import datetime
     from zoneinfo import ZoneInfo
+
+    mode = st.radio("View", ["Today / next slate", "Historical games"], horizontal=True, label_visibility="collapsed")
+    if mode == "Historical games":
+        hist = load_history(sport)
+        if hist.empty:
+            st.info("No historical games loaded.")
+            return
+        seasons = sorted(hist["season"].unique(), reverse=True)
+        season = st.selectbox("Season", seasons)
+        pool = hist[hist["season"] == season]
+        dates = sorted(pool["game_date"].unique(), reverse=True)
+        day = st.selectbox("Game date", dates, format_func=lambda d: f"{d:%A, %B %-d, %Y}")
+        games = pool[pool["game_date"] == day]
+        if len(games) > 1:
+            labels = [f"{r.away_team} @ {r.home_team}" for r in games.itertuples()]
+            pick = st.selectbox("Game", labels)
+            games = games[[f"{r.away_team} @ {r.home_team}" == pick for r in games.itertuples()]]
+        for _, g in games.iterrows():
+            render_matchup_card(g, sport, played=True)
+        return
 
     today = datetime.now(ZoneInfo("America/Los_Angeles")).date()
     df, shown_date, is_today = games_for_day(load_today(sport), today)
@@ -246,40 +341,7 @@ def page_today(sport: str = "nfl") -> None:
         pick = st.selectbox("Game", labels)
         df = df[[f"{r.away_team} @ {r.home_team}" == pick for r in df.itertuples()]]
     for _, g in df.iterrows():
-        fav = g.spread_favorite if pd.notna(g.spread_favorite) else "—"
-        with st.container(border=True):
-            def rank_text(rank, season_rank) -> str:
-                if sport == "ncaaf":
-                    return f"AP Top 25: #{int(rank)}" if pd.notna(rank) else "Unranked (AP)"
-                return f"Rank #{int(season_rank) if pd.notna(season_rank) else '—'}"
-
-            a, mid, h = st.columns([2, 1, 2])
-            with a:
-                team_block(g.away_team, g.away_record_display,
-                           rank_text(getattr(g, "away_rank", None), g.away_season_rank), g.away_spread_points)
-            with mid:
-                st.markdown('<div class="vs">@</div>', unsafe_allow_html=True)
-                top25 = sport == "ncaaf" and bool(getattr(g, "is_top25_matchup", False))
-                pill = "Top-25 matchup" if top25 else f"{fav} favored"
-                st.markdown(f'<div style="text-align:center;margin-top:0.45rem"><span class="pill">{pill}</span></div>', unsafe_allow_html=True)
-                st.metric("Total (pts)", g.totals_line_points)
-            with h:
-                team_block(g.home_team, g.home_record_display,
-                           rank_text(getattr(g, "home_rank", None), g.home_season_rank), g.home_spread_points, align="right")
-            duel_bar(g.away_team, g.away_consensus_pct, g.home_team, g.home_consensus_pct)
-            st.divider()
-            compare_row("Win %", g.away_win_pct, g.home_win_pct, g.away_team, g.home_team)
-            compare_row("Cover % (ATS)", g.away_against_the_spread_win_pct, g.home_against_the_spread_win_pct, g.away_team, g.home_team)
-            compare_row("Over %", g.away_over_pct, g.home_over_pct, g.away_team, g.home_team)
-            compare_row("Consensus spread accuracy", g.away_consensus_spread_accuracy, g.home_consensus_spread_accuracy, g.away_team, g.home_team)
-            compare_row("Consensus total accuracy", g.away_consensus_total_accuracy, g.home_consensus_total_accuracy, g.away_team, g.home_team)
-            c1, c2 = st.columns(2)
-            c1.metric(f"{g.away_team} avg points", f"{g.away_avg_points_scored:.1f}")
-            c2.metric(f"{g.home_team} avg points", f"{g.home_avg_points_scored:.1f}")
-            with st.expander("What history says in this spot — consensus band & line context"):
-                st.markdown(band_panel(g, sport))
-        st.caption("ATS = against the spread. Cover % excludes pushes. The panel below the expander "
-                   "conditions on tonight's consensus band and spread size — always check n=")
+        render_matchup_card(g, sport)
 
 
 def band_chart(d: pd.DataFrame, x: str, y: str, title: str) -> None:
