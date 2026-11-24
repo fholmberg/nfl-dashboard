@@ -1,7 +1,9 @@
-"""Matchup Board — NFL + NCAAF decision-support dashboard (private).
+"""Matchup Board — NFL + NCAAF decision-support dashboard.
 
 Presents statistics and market data from the elt-pipeline semantic layer
 for users to make their own decisions. It does not recommend bets.
+Set `app_password` in Streamlit secrets to gate access; without it the
+board is public and read-only.
 """
 
 from __future__ import annotations
@@ -10,7 +12,7 @@ import altair as alt
 import pandas as pd
 import streamlit as st
 
-from data import games_for_day, load, load_history, load_today
+from data import games_for_day, load, load_history, load_upcoming, season_option_label
 
 st.set_page_config(page_title="Matchup Board", page_icon="🏈", layout="wide")
 
@@ -63,14 +65,16 @@ def color(team: str) -> str:
 
 
 def require_password() -> bool:
+    # The password is optional: with no app_password secret the board is
+    # public read-only (data comes from a read-only R2 token server-side).
+    # Set app_password in Streamlit secrets to require it.
     expected = ""
     try:
         expected = str(st.secrets.get("app_password", ""))
     except Exception:
         pass
     if not expected:
-        st.error("App password is not configured in Streamlit secrets.")
-        return False
+        return True
     if st.session_state.get("authed"):
         return True
     _, mid, _ = st.columns([1, 1.2, 1])
@@ -184,6 +188,12 @@ def compare_row(label: str, away_val, home_val, away_team: str, home_team: str) 
         f'<div class="cmp-label">{label}</div><div>{side(home_val, home_team, False)}</div></div>',
         unsafe_allow_html=True,
     )
+
+
+def game_x() -> alt.X:
+    """Game-number axis as ordinal categories: whole games only, so the
+    axis can never place fractional ticks (a team can't play 1.2 games)."""
+    return alt.X("game:O", title="Game #")
 
 
 def cpct(x) -> str:
@@ -301,19 +311,19 @@ def render_matchup_card(g, sport: str, played: bool = False) -> None:
                "history panel are colored by value (green ≥55%, pale green ≥50%, amber 45–50%, red <45%) — always check n=")
 
 
-def page_today(sport: str = "nfl") -> None:
-    st.header("Today's games")
+def page_upcoming(sport: str = "nfl") -> None:
+    st.header("Upcoming games")
     from datetime import datetime
     from zoneinfo import ZoneInfo
 
-    mode = st.radio("View", ["Today / next slate", "Historical games"], horizontal=True, label_visibility="collapsed")
+    mode = st.radio("View", ["Upcoming slate", "Historical games"], horizontal=True, label_visibility="collapsed")
     if mode == "Historical games":
         hist = load_history(sport)
         if hist.empty:
             st.info("No historical games loaded.")
             return
         seasons = sorted(hist["season"].unique(), reverse=True)
-        season = st.selectbox("Season", seasons)
+        season = st.selectbox("Season", seasons, format_func=season_option_label)
         pool = hist[hist["season"] == season]
         dates = sorted(pool["game_date"].unique(), reverse=True)
         day = st.selectbox("Game date", dates, format_func=lambda d: f"{d:%A, %B %-d, %Y}")
@@ -327,7 +337,7 @@ def page_today(sport: str = "nfl") -> None:
         return
 
     today = datetime.now(ZoneInfo("America/Los_Angeles")).date()
-    df, shown_date, is_today = games_for_day(load_today(sport), today)
+    df, shown_date, is_today = games_for_day(load_upcoming(sport), today)
     if df.empty:
         sched = "Fri / Sat, Pacific" if sport == "ncaaf" else "Sun / Mon / Thu, Pacific"
         st.info(f"No games scheduled today. The board refreshes on the pipeline schedule ({sched}).")
@@ -368,7 +378,7 @@ def page_consensus(sport: str = "nfl") -> None:
     bands = load("spread_bands", sport)
     latest = int(bands["season"].max())
     seasons_avail = [latest, 0] + sorted([int(s) for s in bands["season"].unique() if s not in (0, latest)], reverse=True)
-    season_pick = st.segmented_control("Season (0 = all seasons)", seasons_avail, default=latest)
+    season_pick = st.segmented_control("Season", seasons_avail, default=latest, format_func=season_option_label)
 
     league = bands[(bands["scope"] == "League") & (bands["season"] == season_pick)]
     tab_fav, tab_dog, tab_tot, tab_line = st.tabs(["Favorites", "Underdogs", "Totals", "By the line"])
@@ -414,7 +424,7 @@ def page_form(sport: str = "nfl") -> None:
     st.header("Team form")
     form = load("form", sport)
     seasons = sorted(form["season"].unique(), reverse=True)
-    season = st.segmented_control("Season", seasons, default=seasons[0])
+    season = st.segmented_control("Season", seasons, default=seasons[0], format_func=season_option_label)
     d = form[form["season"] == season].sort_values("season_rank")
     st.dataframe(
         d,
@@ -458,7 +468,7 @@ def page_trends(sport: str = "nfl") -> None:
     form = load("form", sport)
     team = st.selectbox("Team", sorted(form["team_name"].unique()))
     seasons = sorted(res["season"].unique(), reverse=True)
-    season = st.segmented_control("Season ", seasons, default=seasons[0])
+    season = st.segmented_control("Season ", seasons, default=seasons[0], format_func=season_option_label)
     played = res[(res["season"] == season) & ((res["home_team"] == team) | (res["away_team"] == team))].copy()
     if played.empty:
         st.info("No played games for that selection.")
@@ -477,7 +487,7 @@ def page_trends(sport: str = "nfl") -> None:
     chart = (
         alt.Chart(long)
         .mark_line(point=True)
-        .encode(x=alt.X("game", title="Game #"), y=alt.Y("points", title="Points"),
+        .encode(x=game_x(), y=alt.Y("points", title="Points"),
                 color="kind", tooltip=["game_date", "kind", "points"])
         .properties(height=260)
     )
@@ -486,10 +496,10 @@ def page_trends(sport: str = "nfl") -> None:
     totals_chart = (
         alt.Chart(played)
         .mark_line(point=True)
-        .encode(x=alt.X("game", title="Game #"), y=alt.Y("total_points", title="Points"),
+        .encode(x=game_x(), y=alt.Y("total_points", title="Points"),
                 tooltip=["game_date", "total_points", "totals_line_points"])
         .properties(height=220)
-    ) + alt.Chart(played).mark_line(strokeDash=[5, 4], color="#9db2c3").encode(x="game", y="totals_line_points")
+    ) + alt.Chart(played).mark_line(strokeDash=[5, 4], color="#9db2c3").encode(x=game_x(), y="totals_line_points")
     st.caption("Game total (solid) vs totals line (dashed)")
     st.altair_chart(totals_chart, width="stretch")
     st.dataframe(
@@ -513,5 +523,5 @@ st.caption(
     "no bet recommendations. Lines move; verify before acting."
 )
 
-page = st.sidebar.radio("Page", ["Today", "Team Form", "Trends", "Consensus"])
-{"Today": page_today, "Team Form": page_form, "Trends": page_trends, "Consensus": page_consensus}[page](sport)
+page = st.sidebar.radio("Page", ["Upcoming", "Team Form", "Trends", "Consensus"])
+{"Upcoming": page_upcoming, "Team Form": page_form, "Trends": page_trends, "Consensus": page_consensus}[page](sport)

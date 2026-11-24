@@ -16,7 +16,7 @@ import streamlit as st
 
 TABLES = {
     "upcoming": "semantic/semantic_upcoming_matchups.parquet",
-    # Silver upcoming holds ALL future fixtures; the Today page filters to
+    # Silver upcoming holds ALL future fixtures; the Upcoming page filters to
     # the current date at read time (the semantic table is build-day only
     # and goes stale between pipeline runs).
     "upcoming_all": "silver/fct_{sport}_betting_upcoming.parquet",
@@ -61,8 +61,7 @@ def _con() -> duckdb.DuckDBPyConnection:
     return con
 
 
-@st.cache_data(ttl=3600, show_spinner="Loading warehouse data…")
-def load(table: str, sport: str = "nfl") -> pd.DataFrame:
+def _table_path(table: str, sport: str) -> str:
     # Each sport publishes the same semantic filenames to its own bucket.
     bucket = _setting("r2_bucket_ncaaf", "ncaaf") if sport == "ncaaf" else _setting("r2_bucket", "nfl")
     rel = TABLES[table].format(sport=sport)
@@ -71,13 +70,42 @@ def load(table: str, sport: str = "nfl") -> pd.DataFrame:
         # Local mirror layout: <dir>/data_warehouse (nfl bucket root) and
         # <dir>/ncaaf/data_warehouse (ncaaf bucket root).
         sub = "" if sport == "nfl" else f"{sport}/"
-        path = f"{local_dir}/{sub}data_warehouse/{rel}"
-    else:
-        path = f"s3://{bucket}/data_warehouse/{rel}"
+        return f"{local_dir}/{sub}data_warehouse/{rel}"
+    return f"s3://{bucket}/data_warehouse/{rel}"
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def _warehouse_version(sport: str = "nfl") -> str:
+    """Content stamp of the published warehouse, probed from two small
+    semantic tables. Every publish rewrites these, so the stamp changes
+    whenever new data lands; keying the hour-long caches on it means the
+    board can never keep showing pre-publish records after a publish."""
+    try:
+        form = _con().execute(
+            f"SELECT count(*) FROM read_parquet('{_table_path('form', sport)}')").fetchone()[0]
+        results = _con().execute(
+            f"SELECT count(*) FROM read_parquet('{_table_path('results', sport)}')").fetchone()[0]
+        return f"{form}:{results}"
+    except Exception:
+        return ""
+
+
+@st.cache_data(ttl=3600, show_spinner="Loading warehouse data…")
+def _load_cached(table: str, sport: str, version: str) -> pd.DataFrame:  # 'version' (no _) so Streamlit hashes it into the cache key
+    path = _table_path(table, sport)
     try:
         return _con().execute(f"SELECT * FROM read_parquet('{path}')").fetchdf()
     except Exception as exc:  # surface a readable reason instead of a redacted crash
         raise RuntimeError(f"Failed to load {table} ({sport}) from {path}: {type(exc).__name__}: {_masked(str(exc))}") from None
+
+
+def load(table: str, sport: str = "nfl") -> pd.DataFrame:
+    return _load_cached(table, sport, _warehouse_version(sport))
+
+
+def clear_caches() -> None:
+    for fn in (_warehouse_version, _load_cached, _load_upcoming_cached, _load_history_cached):
+        fn.clear()
 
 
 _FORM_COLS = ["wins", "losses", "record_display", "win_pct", "season_rank",
@@ -106,17 +134,30 @@ def _join_form(df: pd.DataFrame, sport: str) -> pd.DataFrame:
     return df
 
 
-@st.cache_data(ttl=3600, show_spinner="Loading upcoming games…")
-def load_today(sport: str = "nfl") -> pd.DataFrame:
+def season_option_label(season) -> str:
+    """Season picker label: the warehouse's season 0 aggregates all seasons."""
+    return "All seasons" if int(season) == 0 else str(int(season))
+
+
+def load_upcoming(sport: str = "nfl") -> pd.DataFrame:
     """Future fixtures with season form joined, in the semantic column shape
-    the Today page renders. game_date is filtered by the caller."""
+    the Upcoming page renders. game_date is filtered by the caller."""
+    return _load_upcoming_cached(sport, _warehouse_version(sport))
+
+
+@st.cache_data(ttl=3600, show_spinner="Loading upcoming games…")
+def _load_upcoming_cached(sport: str, version: str) -> pd.DataFrame:
     return _join_form(_market_shape(load("upcoming_all", sport).copy()), sport)
 
 
-@st.cache_data(ttl=3600, show_spinner="Loading historical games…")
 def load_history(sport: str = "nfl") -> pd.DataFrame:
+    return _load_history_cached(sport, _warehouse_version(sport))
+
+
+@st.cache_data(ttl=3600, show_spinner="Loading historical games…")
+def _load_history_cached(sport: str, version: str) -> pd.DataFrame:
     """Played games (scores from the semantic results table) with market
-    context and season form joined, same shape as load_today plus scores."""
+    context and season form joined, same shape as load_upcoming plus scores."""
     res = load("results", sport)[
         ["game_date", "season", "week", "home_team", "away_team", "home_score",
          "away_score", "winner", "totals_result", "spread_cover_side",
