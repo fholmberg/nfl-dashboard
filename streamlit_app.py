@@ -285,7 +285,7 @@ def render_matchup_card(g, sport: str, played: bool = False) -> None:
             if played:
                 st.metric("Final", f"{int(g.away_score)} – {int(g.home_score)}")
             else:
-                st.metric("Total (pts)", g.totals_line_points)
+                st.metric("Total (pts)", g.totals_line_points if pd.notna(g.totals_line_points) else "—")
         with h:
             team_block(g.home_team, g.home_record_display,
                        rank_text(getattr(g, "home_rank", None), g.home_season_rank), g.home_spread_points, align="right")

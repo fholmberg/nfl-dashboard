@@ -81,9 +81,9 @@ def _warehouse_version(sport: str = "nfl") -> str:
     whenever new data lands; keying the hour-long caches on it means the
     board can never keep showing pre-publish records after a publish."""
     try:
-        form = _con().execute(
+        form = _con().cursor().execute(
             f"SELECT count(*) FROM read_parquet('{_table_path('form', sport)}')").fetchone()[0]
-        results = _con().execute(
+        results = _con().cursor().execute(
             f"SELECT count(*) FROM read_parquet('{_table_path('results', sport)}')").fetchone()[0]
         return f"{form}:{results}"
     except Exception:
@@ -94,7 +94,7 @@ def _warehouse_version(sport: str = "nfl") -> str:
 def _load_cached(table: str, sport: str, version: str) -> pd.DataFrame:  # 'version' (no _) so Streamlit hashes it into the cache key
     path = _table_path(table, sport)
     try:
-        return _con().execute(f"SELECT * FROM read_parquet('{path}')").fetchdf()
+        return _con().cursor().execute(f"SELECT * FROM read_parquet('{path}')").fetchdf()
     except Exception as exc:  # surface a readable reason instead of a redacted crash
         raise RuntimeError(f"Failed to load {table} ({sport}) from {path}: {type(exc).__name__}: {_masked(str(exc))}") from None
 
