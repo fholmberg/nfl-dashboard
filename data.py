@@ -76,18 +76,27 @@ def _table_path(table: str, sport: str) -> str:
 
 @st.cache_data(ttl=60, show_spinner=False)
 def _warehouse_version(sport: str = "nfl") -> str:
-    """Content stamp of the published warehouse, probed from two small
-    semantic tables. Every publish rewrites these, so the stamp changes
-    whenever new data lands; keying the hour-long caches on it means the
-    board can never keep showing pre-publish records after a publish."""
+    """Content stamp of the published warehouse. It must change on EVERY
+    kind of publish, so it probes more than row counts of form/results:
+    a lines-only publish (spreads/totals landing for already-listed
+    fixtures) changes neither, so upcoming line coverage is included or
+    the board can keep showing a fixture with no consensus for an hour."""
     try:
         form = _con().cursor().execute(
             f"SELECT count(*) FROM read_parquet('{_table_path('form', sport)}')").fetchone()[0]
         results = _con().cursor().execute(
             f"SELECT count(*) FROM read_parquet('{_table_path('results', sport)}')").fetchone()[0]
-        return f"{form}:{results}"
+        stamp = f"{form}:{results}"
     except Exception:
         return ""
+    try:
+        up = _con().cursor().execute(
+            "SELECT count(*), count(home_spread), count(over_under_line) "
+            f"FROM read_parquet('{_table_path('upcoming_all', sport)}')").fetchone()
+        stamp += f":{up[0]}:{up[1]}:{up[2]}"
+    except Exception:
+        pass
+    return stamp
 
 
 @st.cache_data(ttl=3600, show_spinner="Loading warehouse data…")
